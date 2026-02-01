@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>ATARI BRICK – Neon Edition</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- React -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+  <!-- Framer Motion -->
+  <script src="https://unpkg.com/framer-motion/dist/framer-motion.umd.js"></script>
+
+  <!-- Babel (JSX no browser) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+    }
+
+    body {
+      margin: 0;
+      background: #05080f;
+      color: white;
+      font-family: monospace;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #root {
+      position: relative;
+      width: 360px;
+      height: 480px;
+      border-radius: 12px;
+      box-shadow: 0 0 40px rgba(0,255,255,0.3);
+      overflow: hidden;
+      background: #05080f;
+    }
+
+    canvas {
+      display: block;
+      margin: auto;
+      background: transparent;
+    }
+
+    button {
+      background: linear-gradient(135deg, #00ffff, #00aaff);
+      border: none;
+      padding: 10px 16px;
+      margin-top: 12px;
+      color: #001;
+      font-weight: bold;
+      cursor: pointer;
+      border-radius: 6px;
+    }
+
+    button:hover {
+      filter: brightness(1.2);
+    }
+
+    .overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      background: rgba(0,0,0,0.6);
+      z-index: 10;
+    }
+  </style>
+</head>
+
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+
+const { useState, useRef, useEffect, useCallback, useMemo } = React;
+const { motion } = window.FramerMotion;
+
+/* ===================== CONSTANTES ===================== */
+const W = 320;
+const H = 400;
+
+const PADDLE_Y = 360;
+const PADDLE_H = 10;
+const PADDLE_W = 80;
+const BALL_R = 5;
+
+const MAX_SPEED = 520;
+const POWERUP_CHANCE = 0.25;
+
+const BRICK_COLORS = {
+  normal: 'hsl(180,100%,60%)',
+  hard: 'hsl(35,100%,60%)',
+  steel: 'hsl(0,0%,70%)'
+};
+
+/* ===================== ÁUDIO ===================== */
+function useAudio() {
+  const ctxRef = useRef(null);
+
+  const getCtx = () => {
+    if (!ctxRef.current) {
+      ctxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (ctxRef.current.state === 'suspended') {
+      ctxRef.current.resume();
+    }
+    return ctxRef.current;
+  };
+
+  const play = (type) => {
+    const ctx = getCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    const map = {
+      paddle: [500, 0.08],
+      wall: [300, 0.05],
+      brick: [800, 0.1],
+      combo: [1500, 0.12],
+      lose: [120, 0.4],
+      win: [1000, 0.3],
+      powerup: [1200, 0.15]
+    };
+
+    const [freq, dur] = map[type] || [400, 0.05];
+    osc.frequency.value = freq;
+    osc.type = 'square';
+
+    gain.gain.value = 0.1;
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+
+    osc.start();
+    osc.stop(ctx.currentTime + dur);
+  };
+
+  return { play };
+}
+
+/* ===================== BACKGROUND ===================== */
+function AnimatedBackground() {
+  const stars = useMemo(() =>
+    Array.from({ length: 80 }, (_, i) => ({
+      id: i,
+      x: Math.random() * 100,
+      size: Math.random() * 2 + 1,
+      duration: Math.random() * 10 + 8,
+      delay: Math.random() * 10
+    })), []);
+
+  return (
+    <div style={{ position:'absolute', inset:0, overflow:'hidden' }}>
+      {stars.map(s => (
+        <motion.div
+          key={s.id}
+          style={{
+            position:'absolute',
+            left: `${s.x}%`,
+            width: s.size,
+            height: s.size,
+            background: 'white',
+            opacity: 0.6,
+            borderRadius: '50%'
+          }}
+          animate={{ y: ['-10%', '110%'] }}
+          transition={{ duration: s.duration, repeat: Infinity, delay: s.delay, ease:'linear' }}
+        />
+      ))}
+      <div style={{
+        position:'absolute',
+        inset:0,
+        background:'linear-gradient(to bottom, rgba(0,255,255,0.05), transparent, rgba(255,0,255,0.05))',
+        filter:'blur(60px)'
+      }} />
+    </div>
+  );
+}
+
+/* ===================== JOGO ===================== */
+function App() {
+  const canvasRef = useRef(null);
+  const lastRef = useRef(0);
+  const animRef = useRef(0);
+  const input = useRef({ left:false, right:false });
+
+  const { play } = useAudio();
+
+  const [screen, setScreen] = useState('menu');
+
+  const game = useRef({
+    paddle: { x:120, w:PADDLE_W },
+    balls: [],
+    bricks: [],
+    particles: [],
+    score: 0,
+    lives: 3,
+    combo: 0
+  });
+
+  const createBricks = () => {
+    const b = [];
+    let id = 0;
+    for (let r=0;r<5;r++) {
+      for (let c=0;c<8;c++) {
+        const rand = Math.random();
+        const type = rand>0.85?'steel':rand>0.6?'hard':'normal';
+        b.push({
+          id:id++,
+          x:c*38+10,
+          y:r*18+30,
+          w:34,
+          h:12,
+          life:type==='hard'?2:type==='steel'?999:1,
+          type
+        });
+      }
+    }
+    return b;
+  };
+
+  const start = () => {
+    game.current = {
+      paddle:{ x:120, w:PADDLE_W },
+      balls:[{ x:160, y:300, dx:180, dy:-180, r:BALL_R, trail:[] }],
+      bricks:createBricks(),
+      particles:[],
+      score:0,
+      lives:3,
+      combo:0
+    };
+    setScreen('playing');
+  };
+
+  /* ===================== LOOP ===================== */
+  useEffect(() => {
+    if (screen !== 'playing') return;
+    const ctx = canvasRef.current.getContext('2d');
+    lastRef.current = performance.now();
+
+    const loop = (t) => {
+      const dt = Math.min((t - lastRef.current)/1000, 0.033);
+      lastRef.current = t;
+
+      update(dt);
+      render(ctx);
+
+      animRef.current = requestAnimationFrame(loop);
+    };
+
+    animRef.current = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(animRef.current);
+  }, [screen]);
+
+  /* ===================== UPDATE ===================== */
+  const update = (dt) => {
+    const g = game.current;
+
+    if (input.current.left) g.paddle.x -= 300*dt;
+    if (input.current.right) g.paddle.x += 300*dt;
+    g.paddle.x = Math.max(0, Math.min(W - g.paddle.w, g.paddle.x));
+
+    g.balls.forEach(ball => {
+      ball.trail.push({x:ball.x,y:ball.y});
+      if (ball.trail.length>8) ball.trail.shift();
+
+      ball.x += ball.dx*dt;
+      ball.y += ball.dy*dt;
+
+      if (ball.x<ball.r || ball.x>W-ball.r) {
+        ball.dx*=-1; play('wall');
+      }
+      if (ball.y<ball.r) {
+        ball.dy*=-1; play('wall');
+      }
+
+      if (
+        ball.dy>0 &&
+        ball.y+ball.r>=PADDLE_Y &&
+        ball.x>=g.paddle.x &&
+        ball.x<=g.paddle.x+g.paddle.w
+      ) {
+        ball.dy*=-1;
+        play('paddle');
+      }
+
+      g.bricks.forEach(brick=>{
+        if (brick.life<=0) return;
+        if (
+          ball.x>brick.x && ball.x<brick.x+brick.w &&
+          ball.y>brick.y && ball.y<brick.y+brick.h
+        ) {
+          ball.dy*=-1;
+          if (brick.type!=='steel') {
+            brick.life--;
+            g.score += 10 + g.combo*5;
+            g.combo++;
+            play(g.combo>3?'combo':'brick');
+          }
+        }
+      });
+    });
+  };
+
+  /* ===================== RENDER ===================== */
+  const render = (ctx) => {
+    const g = game.current;
+    ctx.fillStyle = 'rgba(5,8,15,0.35)';
+    ctx.fillRect(0,0,W,H);
+
+    g.bricks.forEach(b=>{
+      if (b.life<=0) return;
+      ctx.shadowColor = BRICK_COLORS[b.type];
+      ctx.shadowBlur = 12;
+      ctx.fillStyle = BRICK_COLORS[b.type];
+      ctx.fillRect(b.x,b.y,b.w,b.h);
+      ctx.shadowBlur = 0;
+    });
+
+    g.balls.forEach(ball=>{
+      ball.trail.forEach((t,i)=>{
+        ctx.fillStyle = `rgba(0,255,255,${i/ball.trail.length})`;
+        ctx.beginPath();
+        ctx.arc(t.x,t.y,i,0,Math.PI*2);
+        ctx.fill();
+      });
+      ctx.fillStyle='white';
+      ctx.beginPath();
+      ctx.arc(ball.x,ball.y,ball.r,0,Math.PI*2);
+      ctx.fill();
+    });
+
+    ctx.fillStyle='cyan';
+    ctx.fillRect(g.paddle.x,PADDLE_Y,g.paddle.w,PADDLE_H);
+
+    ctx.fillStyle='white';
+    ctx.font='12px monospace';
+    ctx.fillText(`Score: ${g.score}`,8,14);
+    ctx.fillText(`Combo: x${g.combo}`,8,28);
+  };
+
+  /* ===================== INPUT ===================== */
+  useEffect(()=>{
+    const down = e=>{
+      if (e.key==='ArrowLeft') input.current.left=true;
+      if (e.key==='ArrowRight') input.current.right=true;
+    };
+    const up = e=>{
+      if (e.key==='ArrowLeft') input.current.left=false;
+      if (e.key==='ArrowRight') input.current.right=false;
+    };
+    window.addEventListener('keydown',down);
+    window.addEventListener('keyup',up);
+    return ()=>{window.removeEventListener('keydown',down);window.removeEventListener('keyup',up);}
+  },[]);
+
+  return (
+    <>
+      <AnimatedBackground />
+      <canvas ref={canvasRef} width={W} height={H} />
+      {screen==='menu' && (
+        <div className="overlay">
+          <h2>ATARI BRICK</h2>
+          <button onClick={start}>START</button>
+        </div>
+      )}
+    </>
+  );
+}
+
+/* ===================== MOUNT ===================== */
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+
+</script>
+</body>
+</html>
