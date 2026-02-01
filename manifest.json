@@ -1,11 +1,14 @@
 {
-  "name": "ATARI BRICK – Neon Edition",
-  "short_name": "ATARI BRICK",
-  "start_url": ".",
+  "name": "Neon Brick",
+  "short_name": "NeonBrick",
+  "description": "Jogo estilo Brick Breaker em neon",
+  "start_url": "./index.html",
+  "scope": "./",
   "display": "standalone",
-  "background_color": "#05080f",
-  "theme_color": "#00ffff",
-  "orientation": "portrait",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "orientation": "any",
+  "id": "neon-brick",
   "icons": [
     {
       "src": "icon-192.png",
